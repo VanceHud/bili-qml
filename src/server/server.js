@@ -322,11 +322,11 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
         const [board, expireTime] = await getLeaderBoard(range);
         if (range !== 'realtime') res.set('QML-Cache-Expires', `${expireTime}`);
         let list = board.map((array) => { return { bvid: array[0], count: array[1] } });
+        if (list.length === 0) {
+            return res.json({ success: true, list });
+        }
         // no type or type != 2: add backward capability
         if (!proc_type || proc_type !== 2) {
-            if (list.length === 0) {
-                return res.json({ success: true, list });
-            }
             const cachedTitlePipeline = redis.pipeline();
             list.forEach((item) => cachedTitlePipeline.hmget(`video:${item.bvid}`, 'title', 'titleExpiresAt'));
             const missingTitleIndices = [];
@@ -344,10 +344,9 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                 });
             } catch (cacheErr) {
                 console.error('Failed to read cached titles:', cacheErr);
-                for (let i = 0; i < list.length; i++) {
-                    missingTitleIndices.push(i);
-                }
+                missingTitleIndices.push(...Array.from({ length: list.length }, (_, i) => i));
             }
+            const titleCacheExpireAt = Date.now() + TITLE_CACHE_TTL_MS;
             await Promise.all(missingTitleIndices.map(async (index) => {
                 const item = list[index];
                 try {
@@ -369,7 +368,7 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                                 'title',
                                 title,
                                 'titleExpiresAt',
-                                Date.now() + TITLE_CACHE_TTL_MS
+                                titleCacheExpireAt
                             );
                         } catch (cacheErr) {
                             console.error(`Failed to cache title for ${item.bvid}:`, cacheErr);
