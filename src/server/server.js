@@ -325,7 +325,9 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
             cachedTitleResults.forEach(([err, result], index) => {
                 if (!err && Array.isArray(result)) {
                     const [title, expiresAt] = result;
-                    if (title && expiresAt && Number(expiresAt) > Date.now()) {
+                    const hasTitle = title !== null && title !== undefined;
+                    const hasExpiry = expiresAt !== null && expiresAt !== undefined;
+                    if (hasTitle && hasExpiry && Number(expiresAt) > Date.now()) {
                         list[index].title = title;
                         return;
                     }
