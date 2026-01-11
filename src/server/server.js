@@ -25,6 +25,12 @@ const TITLE_CACHE_TTL_MS = Number(process.env.TITLE_CACHE_TTL_MS) || 6 * 3600 * 
 
 const redis = new Redis(`${process.env.UPSTASH_REDIS_PROTO || "redis"}://default:${process.env.UPSTASH_REDIS_REST_TOKEN}@${process.env.UPSTASH_REDIS_REST_URL}`);
 
+function isTitleCacheValid(title, expiresAt) {
+    const hasTitle = title !== null && title !== undefined;
+    const hasExpiry = expiresAt !== null && expiresAt !== undefined;
+    return hasTitle && hasExpiry && Number(expiresAt) > Date.now();
+}
+
 // 频率限制器：检查并增加计数
 async function checkRateLimit(key, maxRequests, windowSeconds) {
     const current = await redis.incr(key);
@@ -320,20 +326,23 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
         if (!proc_type || proc_type !== 2) {
             const cachedTitlePipeline = redis.pipeline();
             list.forEach((item) => cachedTitlePipeline.hmget(`video:${item.bvid}`, 'title', 'titleExpiresAt'));
-            const cachedTitleResults = await cachedTitlePipeline.exec();
             const missingTitleIndices = [];
-            cachedTitleResults.forEach(([err, result], index) => {
-                if (!err && Array.isArray(result)) {
-                    const [title, expiresAt] = result;
-                    const hasTitle = title !== null && title !== undefined;
-                    const hasExpiry = expiresAt !== null && expiresAt !== undefined;
-                    if (hasTitle && hasExpiry && Number(expiresAt) > Date.now()) {
-                        list[index].title = title;
-                        return;
+            try {
+                const cachedTitleResults = await cachedTitlePipeline.exec();
+                cachedTitleResults.forEach(([err, result], index) => {
+                    if (!err && Array.isArray(result)) {
+                        const [title, expiresAt] = result;
+                        if (isTitleCacheValid(title, expiresAt)) {
+                            list[index].title = title;
+                            return;
+                        }
                     }
-                }
-                missingTitleIndices.push(index);
-            });
+                    missingTitleIndices.push(index);
+                });
+            } catch (cacheErr) {
+                console.error('Failed to read cached titles:', cacheErr);
+                missingTitleIndices.push(...list.map((_, index) => index));
+            }
             await Promise.all(missingTitleIndices.map(async (index) => {
                 const item = list[index];
                 try {
@@ -358,13 +367,13 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                                 Date.now() + TITLE_CACHE_TTL_MS
                             );
                         } catch (cacheErr) {
-                            console.error(`缓存标题失败 ${item.bvid}:`, cacheErr);
+                            console.error(`Failed to cache title for ${item.bvid}:`, cacheErr);
                         }
                     } else {
                         list[index].title = '未知标题';
                     }
                 } catch (err) {
-                    console.error(`获取标题失败 ${item.bvid}:`, err);
+                    console.error(`Failed to fetch title for ${item.bvid}:`, err);
                     list[index].title = '加载失败';
                 }
             }));
