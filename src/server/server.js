@@ -317,7 +317,19 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
         let list = board.map((array) => { return { bvid: array[0], count: array[1] } });
         // no type or type != 2: add backward capability
         if (!proc_type || proc_type !== 2) {
-            await Promise.all(list.map(async (item, index) => {
+            const cachedTitlePipeline = redis.pipeline();
+            list.forEach((item) => cachedTitlePipeline.hget(`video:${item.bvid}`, 'title'));
+            const cachedTitleResults = await cachedTitlePipeline.exec();
+            cachedTitleResults.forEach(([err, title], index) => {
+                if (!err && title) {
+                    list[index].title = title;
+                }
+            });
+            const missingTitleIndices = list
+                .map((_, index) => index)
+                .filter((index) => !list[index].title);
+            await Promise.all(missingTitleIndices.map(async (index) => {
+                const item = list[index];
                 try {
                     const conn = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${item.bvid}`,
                         {
@@ -329,7 +341,9 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                         });
                     const json = await conn.json();
                     if (json.code === 0 && json.data?.title) {
-                        list[index].title = json.data.title;
+                        const title = json.data.title;
+                        list[index].title = title;
+                        await redis.hset(`video:${item.bvid}`, 'title', title);
                     } else {
                         list[index].title = '未知标题';
                     }
