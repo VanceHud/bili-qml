@@ -324,6 +324,9 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
         let list = board.map((array) => { return { bvid: array[0], count: array[1] } });
         // no type or type != 2: add backward capability
         if (!proc_type || proc_type !== 2) {
+            if (list.length === 0) {
+                return res.json({ success: true, list });
+            }
             const cachedTitlePipeline = redis.pipeline();
             list.forEach((item) => cachedTitlePipeline.hmget(`video:${item.bvid}`, 'title', 'titleExpiresAt'));
             const missingTitleIndices = [];
@@ -341,7 +344,9 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                 });
             } catch (cacheErr) {
                 console.error('Failed to read cached titles:', cacheErr);
-                missingTitleIndices.push(...list.map((_, index) => index));
+                for (let i = 0; i < list.length; i++) {
+                    missingTitleIndices.push(i);
+                }
             }
             await Promise.all(missingTitleIndices.map(async (index) => {
                 const item = list[index];
