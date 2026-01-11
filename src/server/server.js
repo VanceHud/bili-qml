@@ -19,10 +19,17 @@ const RATE_LIMIT_VOTE_MAX = Number(process.env.RATE_LIMIT_VOTE_MAX) || 10; // �
 const RATE_LIMIT_VOTE_WINDOW = Number(process.env.RATE_LIMIT_VOTE_WINDOW) || 300; // 投票窗口（秒）
 const RATE_LIMIT_LEADERBOARD_MAX = Number(process.env.RATE_LIMIT_LEADERBOARD_MAX) || 20; // 排行榜最大次数
 const RATE_LIMIT_LEADERBOARD_WINDOW = Number(process.env.RATE_LIMIT_LEADERBOARD_WINDOW) || 300; // 排行榜窗口（秒）
+const TITLE_CACHE_TTL_MS = Number(process.env.TITLE_CACHE_TTL_MS) || 6 * 3600 * 1000; // 视频标题缓存时间
 
 // 使用Workers KV作为缓存，见worker.js
 
 const redis = new Redis(`${process.env.UPSTASH_REDIS_PROTO || "redis"}://default:${process.env.UPSTASH_REDIS_REST_TOKEN}@${process.env.UPSTASH_REDIS_REST_URL}`);
+
+function isTitleCacheValid(title, expiresAt) {
+    const hasTitle = title !== null && title !== undefined;
+    const hasExpiry = expiresAt !== null && expiresAt !== undefined;
+    return hasTitle && hasExpiry && Number(expiresAt) > Date.now();
+}
 
 // 频率限制器：检查并增加计数
 async function checkRateLimit(key, maxRequests, windowSeconds) {
@@ -315,9 +322,33 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
         const [board, expireTime] = await getLeaderBoard(range);
         if (range !== 'realtime') res.set('QML-Cache-Expires', `${expireTime}`);
         let list = board.map((array) => { return { bvid: array[0], count: array[1] } });
+        if (list.length === 0) {
+            return res.json({ success: true, list });
+        }
         // no type or type != 2: add backward capability
         if (!proc_type || proc_type !== 2) {
-            await Promise.all(list.map(async (item, index) => {
+            const titleBatchLookup = redis.pipeline();
+            list.forEach((item) => titleBatchLookup.hmget(`video:${item.bvid}`, 'title', 'titleExpiresAt'));
+            let missingTitleIndices = [];
+            try {
+                const cachedTitleResults = await titleBatchLookup.exec();
+                cachedTitleResults.forEach(([err, result], index) => {
+                    if (!err && Array.isArray(result)) {
+                        const [title, expiresAt] = result;
+                        if (isTitleCacheValid(title, expiresAt)) {
+                            list[index].title = title;
+                            return;
+                        }
+                    }
+                    missingTitleIndices.push(index);
+                });
+            } catch (cacheErr) {
+                console.error('Failed to read cached titles:', cacheErr);
+                missingTitleIndices = Array.from({ length: list.length }, (_, i) => i);
+            }
+            const titleCacheWritePipeline = redis.pipeline();
+            await Promise.all(missingTitleIndices.map(async (index) => {
+                const item = list[index];
                 try {
                     const conn = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${item.bvid}`,
                         {
@@ -328,16 +359,33 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                             }
                         });
                     const json = await conn.json();
-                    if (json.code === 0 && json.data?.title) {
-                        list[index].title = json.data.title;
+                        if (json.code === 0 && json.data?.title) {
+                            const title = json.data.title;
+                            list[index].title = title;
+                            try {
+                                titleCacheWritePipeline.hset(
+                                    `video:${item.bvid}`,
+                                    'title',
+                                    title,
+                                    'titleExpiresAt',
+                                    Date.now() + TITLE_CACHE_TTL_MS
+                                );
+                        } catch (cacheErr) {
+                            console.error(`Failed to cache title for ${item.bvid}:`, cacheErr);
+                        }
                     } else {
                         list[index].title = '未知标题';
                     }
                 } catch (err) {
-                    console.error(`获取标题失败 ${item.bvid}:`, err);
+                    console.error(`Failed to fetch title for ${item.bvid}:`, err);
                     list[index].title = '加载失败';
                 }
             }));
+            try {
+                await titleCacheWritePipeline.exec();
+            } catch (cacheErr) {
+                console.error('Failed to write cached titles:', cacheErr);
+            }
         }
         res.json({ success: true, list: list });
     } catch (error) {
