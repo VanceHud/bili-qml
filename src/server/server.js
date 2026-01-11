@@ -327,11 +327,11 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
         }
         // no type or type != 2: add backward capability
         if (!proc_type || proc_type !== 2) {
-            const cachedTitlePipeline = redis.pipeline();
-            list.forEach((item) => cachedTitlePipeline.hmget(`video:${item.bvid}`, 'title', 'titleExpiresAt'));
+            const titleCachePipeline = redis.pipeline();
+            list.forEach((item) => titleCachePipeline.hmget(`video:${item.bvid}`, 'title', 'titleExpiresAt'));
             const missingTitleIndices = [];
             try {
-                const cachedTitleResults = await cachedTitlePipeline.exec();
+                const cachedTitleResults = await titleCachePipeline.exec();
                 cachedTitleResults.forEach(([err, result], index) => {
                     if (!err && Array.isArray(result)) {
                         const [title, expiresAt] = result;
@@ -344,9 +344,10 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                 });
             } catch (cacheErr) {
                 console.error('Failed to read cached titles:', cacheErr);
-                missingTitleIndices.push(...Array.from({ length: list.length }, (_, i) => i));
+                for (let i = 0; i < list.length; i++) {
+                    missingTitleIndices.push(i);
+                }
             }
-            const titleCacheExpireAt = Date.now() + TITLE_CACHE_TTL_MS;
             await Promise.all(missingTitleIndices.map(async (index) => {
                 const item = list[index];
                 try {
@@ -368,7 +369,7 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                                 'title',
                                 title,
                                 'titleExpiresAt',
-                                titleCacheExpireAt
+                                Date.now() + TITLE_CACHE_TTL_MS
                             );
                         } catch (cacheErr) {
                             console.error(`Failed to cache title for ${item.bvid}:`, cacheErr);
