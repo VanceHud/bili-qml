@@ -19,6 +19,7 @@ const RATE_LIMIT_VOTE_MAX = Number(process.env.RATE_LIMIT_VOTE_MAX) || 10; // �
 const RATE_LIMIT_VOTE_WINDOW = Number(process.env.RATE_LIMIT_VOTE_WINDOW) || 300; // 投票窗口（秒）
 const RATE_LIMIT_LEADERBOARD_MAX = Number(process.env.RATE_LIMIT_LEADERBOARD_MAX) || 20; // 排行榜最大次数
 const RATE_LIMIT_LEADERBOARD_WINDOW = Number(process.env.RATE_LIMIT_LEADERBOARD_WINDOW) || 300; // 排行榜窗口（秒）
+const TITLE_CACHE_TTL_MS = Number(process.env.TITLE_CACHE_TTL_MS) || 6 * 3600 * 1000; // 视频标题缓存时间
 
 // 使用Workers KV作为缓存，见worker.js
 
@@ -318,16 +319,19 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
         // no type or type != 2: add backward capability
         if (!proc_type || proc_type !== 2) {
             const cachedTitlePipeline = redis.pipeline();
-            list.forEach((item) => cachedTitlePipeline.hget(`video:${item.bvid}`, 'title'));
+            list.forEach((item) => cachedTitlePipeline.hmget(`video:${item.bvid}`, 'title', 'titleExpiresAt'));
             const cachedTitleResults = await cachedTitlePipeline.exec();
-            cachedTitleResults.forEach(([err, title], index) => {
-                if (!err && title) {
-                    list[index].title = title;
+            const missingTitleIndices = [];
+            cachedTitleResults.forEach(([err, result], index) => {
+                if (!err && result) {
+                    const [title, expiresAt] = result;
+                    if (title && expiresAt && Number(expiresAt) > Date.now()) {
+                        list[index].title = title;
+                        return;
+                    }
                 }
+                if (!list[index].title) missingTitleIndices.push(index);
             });
-            const missingTitleIndices = list
-                .map((_, index) => index)
-                .filter((index) => !list[index].title);
             await Promise.all(missingTitleIndices.map(async (index) => {
                 const item = list[index];
                 try {
@@ -343,7 +347,17 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                     if (json.code === 0 && json.data?.title) {
                         const title = json.data.title;
                         list[index].title = title;
-                        await redis.hset(`video:${item.bvid}`, 'title', title);
+                        try {
+                            await redis.hset(
+                                `video:${item.bvid}`,
+                                'title',
+                                title,
+                                'titleExpiresAt',
+                                Date.now() + TITLE_CACHE_TTL_MS
+                            );
+                        } catch (cacheErr) {
+                            console.error(`缓存标题失败 ${item.bvid}:`, cacheErr);
+                        }
                     } else {
                         list[index].title = '未知标题';
                     }
