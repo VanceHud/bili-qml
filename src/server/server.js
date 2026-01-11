@@ -323,14 +323,14 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
             const cachedTitleResults = await cachedTitlePipeline.exec();
             const missingTitleIndices = [];
             cachedTitleResults.forEach(([err, result], index) => {
-                if (!err && result) {
+                if (!err && Array.isArray(result) && (result[0] !== null || result[1] !== null)) {
                     const [title, expiresAt] = result;
                     if (title && expiresAt && Number(expiresAt) > Date.now()) {
                         list[index].title = title;
                         return;
                     }
                 }
-                if (!list[index].title) missingTitleIndices.push(index);
+                missingTitleIndices.push(index);
             });
             await Promise.all(missingTitleIndices.map(async (index) => {
                 const item = list[index];
