@@ -327,11 +327,11 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
         }
         // no type or type != 2: add backward capability
         if (!proc_type || proc_type !== 2) {
-            const titleCachePipeline = redis.pipeline();
-            list.forEach((item) => titleCachePipeline.hmget(`video:${item.bvid}`, 'title', 'titleExpiresAt'));
-            const missingTitleIndices = [];
+            const titleBatchLookup = redis.pipeline();
+            list.forEach((item) => titleBatchLookup.hmget(`video:${item.bvid}`, 'title', 'titleExpiresAt'));
+            let missingTitleIndices = [];
             try {
-                const cachedTitleResults = await titleCachePipeline.exec();
+                const cachedTitleResults = await titleBatchLookup.exec();
                 cachedTitleResults.forEach(([err, result], index) => {
                     if (!err && Array.isArray(result)) {
                         const [title, expiresAt] = result;
@@ -344,10 +344,9 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                 });
             } catch (cacheErr) {
                 console.error('Failed to read cached titles:', cacheErr);
-                for (let i = 0; i < list.length; i++) {
-                    missingTitleIndices.push(i);
-                }
+                missingTitleIndices = Array.from({ length: list.length }, (_, i) => i);
             }
+            const titleCacheWritePipeline = redis.pipeline();
             await Promise.all(missingTitleIndices.map(async (index) => {
                 const item = list[index];
                 try {
@@ -360,17 +359,17 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                             }
                         });
                     const json = await conn.json();
-                    if (json.code === 0 && json.data?.title) {
-                        const title = json.data.title;
-                        list[index].title = title;
-                        try {
-                            await redis.hset(
-                                `video:${item.bvid}`,
-                                'title',
-                                title,
-                                'titleExpiresAt',
-                                Date.now() + TITLE_CACHE_TTL_MS
-                            );
+                        if (json.code === 0 && json.data?.title) {
+                            const title = json.data.title;
+                            list[index].title = title;
+                            try {
+                                titleCacheWritePipeline.hset(
+                                    `video:${item.bvid}`,
+                                    'title',
+                                    title,
+                                    'titleExpiresAt',
+                                    Date.now() + TITLE_CACHE_TTL_MS
+                                );
                         } catch (cacheErr) {
                             console.error(`Failed to cache title for ${item.bvid}:`, cacheErr);
                         }
@@ -382,6 +381,11 @@ app.get(['/api/leaderboard', '/leaderboard'], async (req, res) => {
                     list[index].title = '加载失败';
                 }
             }));
+            try {
+                await titleCacheWritePipeline.exec();
+            } catch (cacheErr) {
+                console.error('Failed to write cached titles:', cacheErr);
+            }
         }
         res.json({ success: true, list: list });
     } catch (error) {
